@@ -1,0 +1,22 @@
+# WebSocket 服务器配置
+websocket:
+  # 监听端口（确保与网站 config 表中 plugin_ws_port 一致）
+  port: 25585
+  # 认证密钥（必须与网站 config 表中 plugin_ws_secret 一致）
+  secret: "change-me-to-a-random-string"
+  # 是否启用
+  enabled: true
+  # 绑定地址（0.0.0.0 = 所有网卡）
+  host: "0.0.0.0"
+
+# 数据采集配置
+stats:
+  # 服务器状态推送间隔（秒）
+  push-interval-seconds: 30
+  # 世界统计推送间隔（秒）
+  world-stats-interval-seconds: 300
+  # 玩家统计批量推送间隔（秒）
+  player-stats-interval-seconds: 600
+
+# 调试
+debug: false

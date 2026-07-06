@@ -1,0 +1,15 @@
+name: VanillaWhitelist
+version: "${version}"
+main: com.vanillawhitelist.plugin.VanillaWhitelistPlugin
+api-version: "1.21"
+description: Vanilla Whitelist Management Plugin with WebSocket Integration
+author: VanillaWhitelist Team
+commands:
+  vanillawhitelist:
+    description: VanillaWhitelist admin commands
+    permission: vanillawhitelist.admin
+    aliases: [vwl]
+permissions:
+  vanillawhitelist.admin:
+    description: Admin access to plugin commands
+    default: op
