@@ -348,14 +348,14 @@ val players = Bukkit.getOnlinePlayers().map { player ->
 
 ```kotlin
 // 已探索区块 — 没有直接 API，用已加载区块数近似
-// 或读取 region 文件计数（更准确但开销大）
-val exploredChunks = world.loadedChunkCount  // 近似值
+val exploredChunks = world.loadedChunkCount
 
-// 方块统计 — 使用 Bukkit Statistic API（需要 OfflinePlayer）
-// 注意：这个数据量大，建议缓存 + 定期更新
-val stats = Bukkit.getOfflinePlayer(uuid)
-val blocksPlaced = stats.getStatistic(Statistic.USE_ITEM)  // 近似
-val blocksBroken = stats.getStatistic(Statistic.MINE_BLOCK)
+// 方块统计 — 使用 BlockBreakEvent / BlockPlaceEvent 事件监听累加计数
+// 注: Statistic.MINE_BLOCK 是材质限定的统计项（需要 Material 参数），
+//     Statistic.USE_ITEM 追踪的是物品使用次数而非方块放置数，
+//     因此不能直接使用 Statistic API 获取方块统计。
+//     正确做法：监听 BlockBreakEvent 和 BlockPlaceEvent，
+//     通过 SQLite 持久化累计计数。
 
 // 总加入人次 — 维护一个计数器
 // 在 PlayerJoinEvent 中递增并持久化到文件
@@ -393,22 +393,27 @@ val blocksBroken = stats.getStatistic(Statistic.MINE_BLOCK)
 **数据采集方法**：
 
 ```kotlin
-fun collectPlayerStats(player: OfflinePlayer): Map<String, Any> {
+fun collectPlayerStats(player: OfflinePlayer, worldTracker: WorldTracker): Map<String, Any> {
+    val uuid = player.uniqueId.toString()
     return mapOf(
-        "uuid" to player.uniqueId.toString(),
+        "uuid" to uuid,
         "name" to (player.name ?: "Unknown"),
-        "playtime_seconds" to player.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20, // ticks → seconds
+        "playtime_seconds" to worldTracker.getPlayerPlaytimeSeconds(uuid), // join/quit 事件累加
         "deaths" to player.getStatistic(Statistic.DEATHS),
         "kills" to player.getStatistic(Statistic.MOB_KILLS),
-        "blocks_placed" to player.getStatistic(Statistic.USE_ITEM), // 近似
-        "blocks_broken" to player.getStatistic(Statistic.MINE_BLOCK), // 近似
-        "distance_walked" to player.getStatistic(Statistic.WALK_ONE_CM) / 100.0, // cm → m
-        "achievements_count" to Achievement.values().count { player.hasAchievement(it) },
-        "first_join" to player.firstPlayed.let { java.time.Instant.ofEpochMilli(it).toString() },
-        "last_join" to player.lastPlayed.let { java.time.Instant.ofEpochMilli(it).toString() }
+        "blocks_placed" to worldTracker.getPlayerBlocksPlaced(uuid), // BlockPlaceEvent 累加
+        "blocks_broken" to worldTracker.getPlayerBlocksBroken(uuid), // BlockBreakEvent 累加
+        "distance_walked" to player.getStatistic(Statistic.WALK_ONE_CM) / 100.0,
+        "achievements_count" to worldTracker.getPlayerAdvancementsCount(uuid), // PlayerAdvancementDoneEvent 累加
+        "first_join" to player.firstPlayed.let { Instant.ofEpochMilli(it).toString() },
+        "last_join" to player.lastPlayed.let { Instant.ofEpochMilli(it).toString() }
     )
 }
 ```
+**注**: 以下几项不能直接使用 Statistic API，需通过事件监听累加：
+- `playtime_seconds`: `Statistic.PLAY_ONE_MINUTE` 在 1.21 中不可靠 → 通过 `PlayerJoinEvent`/`PlayerQuitEvent` 计算会话时长并累加入 DB
+- `blocks_placed`/`blocks_broken`: `Statistic.MINE_BLOCK` 是材质限定的（需 Material 参数），`Statistic.USE_ITEM` 追踪的是物品使用 → 通过 `BlockBreakEvent`/`BlockPlaceEvent` 累加
+- `achievements_count`: 旧的 `Achievement` 枚举在 1.12+ 已废弃 → 通过 `PlayerAdvancementDoneEvent` 累加（过滤掉配方解锁）
 
 ### 错误码一览
 

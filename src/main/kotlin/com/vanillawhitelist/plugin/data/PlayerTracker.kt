@@ -129,20 +129,22 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
      */
     private fun pushPlayerStatsOnQuit(player: org.bukkit.entity.Player) {
         try {
+            val uuid = player.uniqueId.toString()
             val playerObj = JsonObject().apply {
-                addProperty("uuid", player.uniqueId.toString())
+                addProperty("uuid", uuid)
                 addProperty("name", player.name)
-                addProperty("playtime_seconds", player.getStatistic(Statistic.PLAY_ONE_MINUTE) / 20)
+                addProperty("playtime_seconds", plugin.worldTracker.getPlayerPlaytimeSeconds(uuid))
                 addProperty("deaths", player.getStatistic(Statistic.DEATHS))
                 addProperty("kills",
                     player.getStatistic(Statistic.MOB_KILLS) +
                     player.getStatistic(Statistic.PLAYER_KILLS)
                 )
-                addProperty("blocks_broken", player.getStatistic(Statistic.MINE_BLOCK))
-                addProperty("blocks_placed", player.getStatistic(Statistic.USE_ITEM))
+                addProperty("blocks_broken", plugin.worldTracker.getPlayerBlocksBroken(uuid))
+                addProperty("blocks_placed", plugin.worldTracker.getPlayerBlocksPlaced(uuid))
                 addProperty("distance_walked",
                     Math.round(player.getStatistic(Statistic.WALK_ONE_CM) / 100.0 * 10.0) / 10.0
                 )
+                addProperty("achievements_count", plugin.worldTracker.getPlayerAdvancementsCount(uuid))
                 addProperty("first_join",
                     java.time.Instant.ofEpochMilli(player.firstPlayed).toString()
                 )
