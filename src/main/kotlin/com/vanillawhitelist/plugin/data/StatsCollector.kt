@@ -100,6 +100,8 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
                 addProperty("loaded_chunks", loadedChunks)
                 addProperty("entity_count", entityCount)
                 addProperty("online_count", onlinePlayers.size)
+                addProperty("uptime_seconds",
+                    java.lang.management.ManagementFactory.getRuntimeMXBean().uptime / 1000)
                 add("players", playersArray)
             }
 
