@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,12 +24,11 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-
-      - name: Generate Gradle wrapper
-        run: gradle wrapper
+        with:
+          gradle-version: '8.10'
 
       - name: Build shadow JAR
-        run: ./gradlew shadowJar --no-daemon
+        run: gradle shadowJar --no-daemon
 
       - name: Upload JAR to Release
         uses: softprops/action-gh-release@v2
