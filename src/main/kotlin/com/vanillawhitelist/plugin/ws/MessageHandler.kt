@@ -17,8 +17,8 @@ import java.util.logging.Level
  * 负责解析收到的 JSON 消息，按 type 分发到不同的处理方法。
  *
  * 优化点：
- * 1. 白名单玩家名解析走 Paper 异步 API（getOfflinePlayerAsync），
- *    避免 getOfflinePlayer(String) 同步阻塞主线程查 Mojang；白名单读写仍回主线程
+ * 1. 白名单玩家名解析在异步线程执行（getOfflinePlayer(String) 可能同步查 Mojang，
+ *    主线程调用会卡服数秒）；解析完成后白名单读写仍回主线程
  * 2. 单连接替换在认证成功后执行（closeOtherConnections），防止未认证连接挤掉合法网站端
  */
 class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
@@ -124,18 +124,26 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
 
         val server = plugin.server
 
-        // 解析玩家：UUID 仅查本地（无网络）；玩家名走 Paper 异步 API，
-        // 避免已弃用的 getOfflinePlayer(String) 同步阻塞主线程查 Mojang（可卡数秒）
-        val future: CompletableFuture<OfflinePlayer> = if (playerUuid != null) {
+        // 解析玩家：UUID 仅查本地（无网络）；玩家名解析可能同步查 Mojang，
+        // 必须放异步线程——getOfflinePlayer(String) 在主线程调用会卡服数秒
+        val future = CompletableFuture<OfflinePlayer>()
+        if (playerUuid != null) {
             val uuid = try {
                 UUID.fromString(playerUuid)
             } catch (e: IllegalArgumentException) {
                 session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INVALID_UUID"))
                 return
             }
-            CompletableFuture.completedFuture(server.getOfflinePlayer(uuid))
+            future.complete(server.getOfflinePlayer(uuid))
         } else {
-            server.getOfflinePlayerAsync(playerName)
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
+                try {
+                    @Suppress("DEPRECATION")
+                    future.complete(server.getOfflinePlayer(playerName))
+                } catch (e: Exception) {
+                    future.completeExceptionally(e)
+                }
+            })
         }
 
         future.thenAccept { offlinePlayer ->
@@ -188,8 +196,18 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             return
         }
 
-        // 异步解析玩家名（getOfflinePlayer(String) 会同步阻塞主线程查 Mojang）
-        plugin.server.getOfflinePlayerAsync(playerName).thenAccept { offlinePlayer ->
+        // 异步解析玩家名（getOfflinePlayer(String) 可能同步查 Mojang，严禁在主线程调用）
+        val future = CompletableFuture<OfflinePlayer>()
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
+            try {
+                @Suppress("DEPRECATION")
+                future.complete(plugin.server.getOfflinePlayer(playerName))
+            } catch (e: Exception) {
+                future.completeExceptionally(e)
+            }
+        })
+
+        future.thenAccept { offlinePlayer ->
             // 白名单读写必须回主线程
             Bukkit.getScheduler().runTask(plugin, Runnable {
                 try {
