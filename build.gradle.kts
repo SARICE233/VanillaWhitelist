@@ -12,7 +12,7 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:1.21-R0.1-SNAPSHOT")
+    compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("org.xerial:sqlite-jdbc:3.46.0.0")

@@ -16,6 +16,9 @@ class WsSession(
     private val conn: WebSocket
 ) {
 
+    /** 底层连接（用于认证成功后的单连接替换） */
+    val webSocket: WebSocket get() = conn
+
     companion object {
         private val sessions = ConcurrentHashMap<WebSocket, WsSession>()
 
@@ -68,7 +71,8 @@ class WsSession(
             plugin.messageHandler.handleMessage(this, message)
         } catch (e: Exception) {
             plugin.logger.log(Level.WARNING, "Error handling message: ${e.message}", e)
-            send("""{"type":"error","error":"INTERNAL_ERROR","message":"${e.message?.replace("\"", "\\\"")}"}""")
+            // 用 Gson 构造错误响应，避免手工拼字符串转义不完整产生非法 JSON
+            send(plugin.messageHandler.buildError("", "INTERNAL_ERROR", e.message ?: "unknown error"))
         }
     }
 

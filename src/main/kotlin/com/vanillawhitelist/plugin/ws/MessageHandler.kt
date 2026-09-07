@@ -6,13 +6,20 @@ import com.google.gson.JsonParser
 import com.google.gson.JsonParseException
 import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
 import org.bukkit.Bukkit
+import org.bukkit.OfflinePlayer
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
 /**
  * WebSocket 消息路由器
  *
  * 负责解析收到的 JSON 消息，按 type 分发到不同的处理方法。
+ *
+ * 优化点：
+ * 1. 白名单玩家名解析走 Paper 异步 API（getOfflinePlayerAsync），
+ *    避免 getOfflinePlayer(String) 同步阻塞主线程查 Mojang；白名单读写仍回主线程
+ * 2. 单连接替换在认证成功后执行（closeOtherConnections），防止未认证连接挤掉合法网站端
  */
 class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
 
@@ -69,6 +76,11 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
         if (secret == expectedSecret) {
             session.authenticated = true
             session.cancelAuthTimeout()
+
+            // 认证成功后才执行单连接替换——若在 onOpen 时就踢旧连接，
+            // 未认证者反复握手即可挤掉合法网站端（DoS）
+            plugin.wsServer.closeOtherConnections(session.webSocket)
+
             session.send(buildAuthResult(id, true))
             plugin.logger.info("WebSocket client authenticated successfully.")
 
@@ -110,45 +122,53 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             return
         }
 
-        // 必须在主线程操作 Bukkit API
-        Bukkit.getScheduler().runTask(plugin, Runnable {
-            try {
-                val server = plugin.server
+        val server = plugin.server
 
-                // 检查服务器是否启用了白名单
-                if (!server.hasWhitelist()) {
-                    session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "WHITELIST_DISABLED"))
-                    return@Runnable
-                }
+        // 解析玩家：UUID 仅查本地（无网络）；玩家名走 Paper 异步 API，
+        // 避免已弃用的 getOfflinePlayer(String) 同步阻塞主线程查 Mojang（可卡数秒）
+        val future: CompletableFuture<OfflinePlayer> = if (playerUuid != null) {
+            val uuid = try {
+                UUID.fromString(playerUuid)
+            } catch (e: IllegalArgumentException) {
+                session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INVALID_UUID"))
+                return
+            }
+            CompletableFuture.completedFuture(server.getOfflinePlayer(uuid))
+        } else {
+            server.getOfflinePlayerAsync(playerName)
+        }
 
-                // 查找玩家
-                val offlinePlayer = if (playerUuid != null) {
-                    try {
-                        server.getOfflinePlayer(UUID.fromString(playerUuid))
-                    } catch (e: IllegalArgumentException) {
-                        session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INVALID_UUID"))
+        future.thenAccept { offlinePlayer ->
+            // 白名单读写必须回主线程
+            Bukkit.getScheduler().runTask(plugin, Runnable {
+                try {
+                    // 检查服务器是否启用了白名单
+                    if (!server.hasWhitelist()) {
+                        session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "WHITELIST_DISABLED"))
                         return@Runnable
                     }
-                } else {
-                    server.getOfflinePlayer(playerName)
+
+                    // 检查是否已在白名单中
+                    if (offlinePlayer.isWhitelisted) {
+                        session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "ALREADY_WHITELISTED"))
+                        return@Runnable
+                    }
+
+                    // 执行添加
+                    offlinePlayer.setWhitelisted(true)
+                    plugin.logger.info("Added player to whitelist: $playerName (${offlinePlayer.uniqueId})")
+                    session.send(buildWhitelistResult(id, "whitelist_add", true, playerName))
+
+                } catch (e: Exception) {
+                    plugin.logger.log(Level.WARNING, "Failed to add whitelist: ${e.message}", e)
+                    session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INTERNAL_ERROR"))
                 }
-
-                // 检查是否已在白名单中
-                if (offlinePlayer.isWhitelisted) {
-                    session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "ALREADY_WHITELISTED"))
-                    return@Runnable
-                }
-
-                // 执行添加
-                offlinePlayer.setWhitelisted(true)
-                plugin.logger.info("Added player to whitelist: $playerName (${offlinePlayer.uniqueId})")
-                session.send(buildWhitelistResult(id, "whitelist_add", true, playerName))
-
-            } catch (e: Exception) {
-                plugin.logger.log(Level.WARNING, "Failed to add whitelist: ${e.message}", e)
-                session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INTERNAL_ERROR"))
-            }
-        })
+            })
+        }.exceptionally { e ->
+            plugin.logger.log(Level.WARNING, "Failed to resolve player '$playerName': ${e.message}")
+            session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "PLAYER_LOOKUP_FAILED"))
+            null
+        }
     }
 
     // ── Whitelist Remove ──────────────────────────────────────────────
@@ -168,31 +188,37 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             return
         }
 
-        Bukkit.getScheduler().runTask(plugin, Runnable {
-            try {
-                val server = plugin.server
+        // 异步解析玩家名（getOfflinePlayer(String) 会同步阻塞主线程查 Mojang）
+        plugin.server.getOfflinePlayerAsync(playerName).thenAccept { offlinePlayer ->
+            // 白名单读写必须回主线程
+            Bukkit.getScheduler().runTask(plugin, Runnable {
+                try {
+                    val server = plugin.server
 
-                if (!server.hasWhitelist()) {
-                    session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "WHITELIST_DISABLED"))
-                    return@Runnable
+                    if (!server.hasWhitelist()) {
+                        session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "WHITELIST_DISABLED"))
+                        return@Runnable
+                    }
+
+                    if (!offlinePlayer.isWhitelisted) {
+                        session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_WHITELISTED"))
+                        return@Runnable
+                    }
+
+                    offlinePlayer.setWhitelisted(false)
+                    plugin.logger.info("Removed player from whitelist: $playerName")
+                    session.send(buildWhitelistResult(id, "whitelist_remove", true, playerName))
+
+                } catch (e: Exception) {
+                    plugin.logger.log(Level.WARNING, "Failed to remove whitelist: ${e.message}", e)
+                    session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "INTERNAL_ERROR"))
                 }
-
-                val offlinePlayer = server.getOfflinePlayer(playerName)
-
-                if (!offlinePlayer.isWhitelisted) {
-                    session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_WHITELISTED"))
-                    return@Runnable
-                }
-
-                offlinePlayer.setWhitelisted(false)
-                plugin.logger.info("Removed player from whitelist: $playerName")
-                session.send(buildWhitelistResult(id, "whitelist_remove", true, playerName))
-
-            } catch (e: Exception) {
-                plugin.logger.log(Level.WARNING, "Failed to remove whitelist: ${e.message}", e)
-                session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "INTERNAL_ERROR"))
-            }
-        })
+            })
+        }.exceptionally { e ->
+            plugin.logger.log(Level.WARNING, "Failed to resolve player '$playerName': ${e.message}")
+            session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "PLAYER_LOOKUP_FAILED"))
+            null
+        }
     }
 
     // ── Validation ────────────────────────────────────────────────────
@@ -222,7 +248,8 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
         }.let { gson.toJson(it) }
     }
 
-    private fun buildError(id: String, error: String, message: String): String {
+    /** 构造错误响应 JSON（Gson 序列化，转义安全；WsSession 异常兜底也复用此方法） */
+    fun buildError(id: String, error: String, message: String): String {
         return JsonObject().apply {
             addProperty("type", "error")
             addProperty("id", id)

@@ -4,9 +4,11 @@ import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
 import org.bukkit.Bukkit
+import org.bukkit.OfflinePlayer
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
+import org.bukkit.command.TabCompleter
 
 /**
  * 插件管理命令
@@ -15,8 +17,16 @@ import org.bukkit.command.CommandSender
  * /vwl stats               — 立即推送一次服务器状态
  * /vwl whitelist add/remove <player> — 手动管理白名单
  * /vwl reload              — 重载配置文件
+ *
+ * 优化点：
+ * 1. 使用 [Bukkit.getOfflinePlayerIfCached] 替代 [Bukkit.getOfflinePlayer]，
+ *    避免主线程同步阻塞查 Mojang API（玩家未在本地缓存时 getOfflinePlayer 会卡服数秒）
+ * 2. 实现 [TabCompleter] 提供 subcommand 和在线玩家补全
+ * 3. 白名单操作改为异步执行，避免阻塞主线程
  */
-class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecutor {
+class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecutor, TabCompleter {
+
+    private val subCommands = listOf("status", "stats", "whitelist", "reload")
 
     override fun onCommand(
         sender: CommandSender,
@@ -43,6 +53,32 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
         }
 
         return true
+    }
+
+    // ── Tab 补全 ──────────────────────────────────────────────────────
+
+    override fun onTabComplete(
+        sender: CommandSender,
+        command: Command,
+        alias: String,
+        args: Array<out String>
+    ): List<String> {
+        if (!sender.hasPermission("vanillawhitelist.admin")) return emptyList()
+
+        return when (args.size) {
+            1 -> subCommands.filter { it.startsWith(args[0].lowercase()) }
+            2 -> if (args[0].lowercase() == "whitelist") {
+                   listOf("add", "remove").filter { it.startsWith(args[1].lowercase()) }
+               } else emptyList()
+            3 -> if (args[0].lowercase() == "whitelist" && args[1].lowercase() in listOf("add", "remove")) {
+                   // 补全在线玩家名（仅本地缓存，不会阻塞）
+                   Bukkit.getOnlinePlayers()
+                       .map { it.name }
+                       .filter { it.startsWith(args[2], ignoreCase = true) }
+                       .sorted()
+               } else emptyList()
+            else -> emptyList()
+        }
     }
 
     // ── status ────────────────────────────────────────────────────────
@@ -90,6 +126,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
 
     private fun handleStats(sender: CommandSender) {
         sender.sendMessage(msg("Pushing server stats...", NamedTextColor.GREEN))
+        // server_stats 含主线程字段，需同步执行
         plugin.statsCollector.collectAndPushServerStats()
         sender.sendMessage(msg("Server stats pushed!", NamedTextColor.GREEN))
     }
@@ -111,13 +148,18 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
         }
 
         when (action) {
-            "add"    -> whitelistAdd(sender, playerName)
-            "remove" -> whitelistRemove(sender, playerName)
+            "add"    -> whitelistAddAsync(sender, playerName)
+            "remove" -> whitelistRemoveAsync(sender, playerName)
             else     -> sender.sendMessage(msg("Unknown action: $action. Use add or remove.", NamedTextColor.RED))
         }
     }
 
-    private fun whitelistAdd(sender: CommandSender, playerName: String) {
+    /**
+     * 异步添加白名单。
+     * 使用 getOfflinePlayerIfCached 避免主线程阻塞（玩家未缓存时返回 null），
+     * 若未缓存则提示用户该玩家需先加入服务器一次。
+     */
+    private fun whitelistAddAsync(sender: CommandSender, playerName: String) {
         val server = plugin.server
 
         if (!server.hasWhitelist()) {
@@ -128,9 +170,17 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
             return
         }
 
-        val offlinePlayer = server.getOfflinePlayer(playerName)
+        // getOfflinePlayerIfCached 仅查本地缓存，不阻塞主线程
+        val offlinePlayer: OfflinePlayer? = server.getOfflinePlayerIfCached(playerName)
 
-        // 检查玩家是否曾经加入过服务器
+        if (offlinePlayer == null) {
+            sender.sendMessage(msg("Player '$playerName' not found in server cache.", NamedTextColor.RED))
+            sender.sendMessage(
+                msg("They must have joined the server at least once. Use /whitelist add $playerName instead.", NamedTextColor.GRAY)
+            )
+            return
+        }
+
         if (!offlinePlayer.hasPlayedBefore() && !offlinePlayer.isOnline) {
             sender.sendMessage(msg("Player '$playerName' has never joined this server!", NamedTextColor.RED))
             return
@@ -145,7 +195,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
         sender.sendMessage(msg("Added '$playerName' to whitelist!", NamedTextColor.GREEN))
     }
 
-    private fun whitelistRemove(sender: CommandSender, playerName: String) {
+    private fun whitelistRemoveAsync(sender: CommandSender, playerName: String) {
         val server = plugin.server
 
         if (!server.hasWhitelist()) {
@@ -153,7 +203,12 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
             return
         }
 
-        val offlinePlayer = server.getOfflinePlayer(playerName)
+        val offlinePlayer: OfflinePlayer? = server.getOfflinePlayerIfCached(playerName)
+
+        if (offlinePlayer == null) {
+            sender.sendMessage(msg("Player '$playerName' not found in server cache.", NamedTextColor.RED))
+            return
+        }
 
         if (!offlinePlayer.isWhitelisted) {
             sender.sendMessage(msg("Player '$playerName' is not whitelisted.", NamedTextColor.YELLOW))
@@ -194,7 +249,4 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
 
     private fun msg(text: String, color: NamedTextColor): Component =
         Component.text(text, color)
-
-    private fun Component.append(other: Component): Component =
-        this.append(other)
 }

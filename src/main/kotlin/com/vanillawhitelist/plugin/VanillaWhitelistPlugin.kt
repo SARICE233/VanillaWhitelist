@@ -46,9 +46,16 @@ class VanillaWhitelistPlugin : JavaPlugin() {
         worldTracker = WorldTracker(this)
         statsCollector = StatsCollector(this)
 
-        // 6. 注册命令
-        getCommand("vanillawhitelist")?.setExecutor(PluginCommands(this))
-        getCommand("vwl")?.setExecutor(PluginCommands(this))
+        // 6. 注册命令（同时作为 TabCompleter）
+        val commands = PluginCommands(this)
+        getCommand("vanillawhitelist")?.let { cmd ->
+            cmd.setExecutor(commands)
+            cmd.tabCompleter = commands
+        }
+        getCommand("vwl")?.let { cmd ->
+            cmd.setExecutor(commands)
+            cmd.tabCompleter = commands
+        }
 
         // 7. 注册事件监听器
         server.pluginManager.registerEvents(playerTracker, this)
@@ -61,13 +68,16 @@ class VanillaWhitelistPlugin : JavaPlugin() {
             logger.info("WebSocket server is disabled in config.")
         }
 
-        // 9. 启动定时任务
+        // 9. 启动定时任务（含 WorldTracker 的异步 flush 任务）
         statsCollector.startPeriodicTasks()
+        worldTracker.startFlushTask()
 
         logger.info("VanillaWhitelist Plugin v${pluginMeta.version} enabled!")
     }
 
     override fun onDisable() {
+        // 先停止 flush 任务并执行最后一次 flush，确保数据落盘
+        worldTracker.stopFlushTask()
         statsCollector.cancelTasks()
         wsServer.stop()
         database.close()

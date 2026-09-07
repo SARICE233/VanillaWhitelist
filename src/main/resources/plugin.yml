@@ -1,7 +1,7 @@
 name: VanillaWhitelist
 version: "${version}"
 main: com.vanillawhitelist.plugin.VanillaWhitelistPlugin
-api-version: "1.21"
+api-version: "1.21.11"
 description: Vanilla Whitelist Management Plugin with WebSocket Integration
 author: VanillaWhitelist Team
 commands:
