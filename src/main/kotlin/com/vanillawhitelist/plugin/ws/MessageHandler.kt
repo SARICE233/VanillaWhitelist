@@ -4,6 +4,8 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonParseException
+import com.vanillawhitelist.plugin.IMPL
+import com.vanillawhitelist.plugin.PROTOCOL_VERSION
 import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
 import org.bukkit.Bukkit
 import org.bukkit.OfflinePlayer
@@ -25,16 +27,16 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
 
     private val gson = Gson()
 
-    fun handleMessage(session: WsSession, message: String) {
+    fun handleMessage(peer: Peer, message: String) {
         val json: JsonObject = try {
             JsonParser.parseString(message).asJsonObject
         } catch (e: JsonParseException) {
-            session.send(buildError("", "INVALID_JSON", "Invalid JSON format"))
+            peer.send(buildError("", "INVALID_JSON", "Invalid JSON format"))
             return
         }
 
         val type = json.get("type")?.asString ?: run {
-            session.send(buildError("", "MISSING_TYPE", "Missing 'type' field"))
+            peer.send(buildError("", "MISSING_TYPE", "Missing 'type' field"))
             return
         }
 
@@ -43,13 +45,13 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
         }
 
         when (type) {
-            "auth"             -> handleAuth(session, json)
-            "ping"             -> handlePing(session)
-            "whitelist_add"    -> handleWhitelistAdd(session, json)
-            "whitelist_remove" -> handleWhitelistRemove(session, json)
+            "auth"             -> handleAuth(peer, json)
+            "ping"             -> handlePing(peer)
+            "whitelist_add"    -> handleWhitelistAdd(peer, json)
+            "whitelist_remove" -> handleWhitelistRemove(peer, json)
             else -> {
-                if (!session.authenticated) {
-                    session.send(
+                if (!peer.authenticated) {
+                    peer.send(
                         buildError(jsonId(json), "NOT_AUTHENTICATED", "Please authenticate first")
                     )
                 } else {
@@ -61,12 +63,12 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
 
     // ── Auth ──────────────────────────────────────────────────────────
 
-    private fun handleAuth(session: WsSession, json: JsonObject) {
+    private fun handleAuth(peer: Peer, json: JsonObject) {
         val id = jsonId(json)
 
         // 如果已经认证过，直接返回成功
-        if (session.authenticated) {
-            session.send(buildAuthResult(id, true))
+        if (peer.authenticated) {
+            peer.send(buildAuthResult(id, true))
             return
         }
 
@@ -74,51 +76,60 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
         val expectedSecret = plugin.pluginConfig.websocketSecret
 
         if (secret == expectedSecret) {
-            session.authenticated = true
-            session.cancelAuthTimeout()
+            peer.authenticated = true
 
-            // 认证成功后才执行单连接替换——若在 onOpen 时就踢旧连接，
-            // 未认证者反复握手即可挤掉合法网站端（DoS）
-            plugin.wsServer.closeOtherConnections(session.webSocket)
+            // 以下只对入站模式有意义（出站模式只有一个连接，也没有认证超时）
+            if (peer is WsSession) {
+                peer.cancelAuthTimeout()
+                // 认证成功后才执行单连接替换——若在 onOpen 时就踢旧连接，
+                // 未认证者反复握手即可挤掉合法网站端（DoS）
+                val t = plugin.transport
+                if (t is WsServer) t.closeOtherConnections(peer.webSocket)
+            }
 
-            session.send(buildAuthResult(id, true))
+            peer.send(buildAuthResult(id, true))
             plugin.logger.info("WebSocket client authenticated successfully.")
 
             // 认证成功，补发网站离线期间缓冲的消息
-            val buffered = plugin.wsServer.bufferSize()
+            val buffered = plugin.transport.bufferSize()
             if (buffered > 0) {
-                plugin.wsServer.flushBuffer()
+                plugin.transport.flushBuffer()
             }
+
+            // 再立即推一次最新状态，网站无需等下一个推送周期（与两个模组一致）
+            plugin.statsCollector.collectAndPushServerStats()
+            // 并给一份完整的成就明细作基准
+            plugin.statsCollector.collectAndPushPlayerAdvancements(false)
         } else {
-            session.send(buildAuthResult(id, false, "INVALID_SECRET"))
-            session.close(4003, "Invalid secret")
+            peer.send(buildAuthResult(id, false, "INVALID_SECRET"))
+            if (peer is WsSession) peer.close(4003, "Invalid secret") else peer.close()
             plugin.logger.warning("WebSocket auth failed: invalid secret.")
         }
     }
 
     // ── Ping/Pong ─────────────────────────────────────────────────────
 
-    private fun handlePing(session: WsSession) {
-        session.send("""{"type":"pong"}""")
+    private fun handlePing(peer: Peer) {
+        peer.send("""{"type":"pong"}""")
     }
 
     // ── Whitelist Add ─────────────────────────────────────────────────
 
-    private fun handleWhitelistAdd(session: WsSession, json: JsonObject) {
+    private fun handleWhitelistAdd(peer: Peer, json: JsonObject) {
         val id = jsonId(json)
         val playerName = json.get("player_name")?.asString ?: ""
         val playerUuid = json.get("player_uuid")?.asString
 
         // 权限检查
-        if (!session.authenticated) {
-            session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "NOT_AUTHENTICATED"))
+        if (!peer.authenticated) {
+            peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "NOT_AUTHENTICATED"))
             return
         }
 
         // 名字合法性校验
         val nameError = validatePlayerName(playerName)
         if (nameError != null) {
-            session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, nameError))
+            peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, nameError))
             return
         }
 
@@ -131,7 +142,7 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             val uuid = try {
                 UUID.fromString(playerUuid)
             } catch (e: IllegalArgumentException) {
-                session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INVALID_UUID"))
+                peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INVALID_UUID"))
                 return
             }
             future.complete(server.getOfflinePlayer(uuid))
@@ -152,47 +163,47 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
                 try {
                     // 检查服务器是否启用了白名单
                     if (!server.hasWhitelist()) {
-                        session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "WHITELIST_DISABLED"))
+                        peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "WHITELIST_DISABLED"))
                         return@Runnable
                     }
 
                     // 检查是否已在白名单中
                     if (offlinePlayer.isWhitelisted) {
-                        session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "ALREADY_WHITELISTED"))
+                        peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "ALREADY_WHITELISTED"))
                         return@Runnable
                     }
 
                     // 执行添加
                     offlinePlayer.setWhitelisted(true)
                     plugin.logger.info("Added player to whitelist: $playerName (${offlinePlayer.uniqueId})")
-                    session.send(buildWhitelistResult(id, "whitelist_add", true, playerName))
+                    peer.send(buildWhitelistResult(id, "whitelist_add", true, playerName))
 
                 } catch (e: Exception) {
                     plugin.logger.log(Level.WARNING, "Failed to add whitelist: ${e.message}", e)
-                    session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INTERNAL_ERROR"))
+                    peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "INTERNAL_ERROR"))
                 }
             })
         }.exceptionally { e ->
             plugin.logger.log(Level.WARNING, "Failed to resolve player '$playerName': ${e.message}")
-            session.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "PLAYER_LOOKUP_FAILED"))
+            peer.send(buildWhitelistResult(id, "whitelist_add", false, playerName, "PLAYER_LOOKUP_FAILED"))
             null
         }
     }
 
     // ── Whitelist Remove ──────────────────────────────────────────────
 
-    private fun handleWhitelistRemove(session: WsSession, json: JsonObject) {
+    private fun handleWhitelistRemove(peer: Peer, json: JsonObject) {
         val id = jsonId(json)
         val playerName = json.get("player_name")?.asString ?: ""
 
-        if (!session.authenticated) {
-            session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_AUTHENTICATED"))
+        if (!peer.authenticated) {
+            peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_AUTHENTICATED"))
             return
         }
 
         val nameError = validatePlayerName(playerName)
         if (nameError != null) {
-            session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, nameError))
+            peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, nameError))
             return
         }
 
@@ -214,27 +225,27 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
                     val server = plugin.server
 
                     if (!server.hasWhitelist()) {
-                        session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "WHITELIST_DISABLED"))
+                        peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "WHITELIST_DISABLED"))
                         return@Runnable
                     }
 
                     if (!offlinePlayer.isWhitelisted) {
-                        session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_WHITELISTED"))
+                        peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "NOT_WHITELISTED"))
                         return@Runnable
                     }
 
                     offlinePlayer.setWhitelisted(false)
                     plugin.logger.info("Removed player from whitelist: $playerName")
-                    session.send(buildWhitelistResult(id, "whitelist_remove", true, playerName))
+                    peer.send(buildWhitelistResult(id, "whitelist_remove", true, playerName))
 
                 } catch (e: Exception) {
                     plugin.logger.log(Level.WARNING, "Failed to remove whitelist: ${e.message}", e)
-                    session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "INTERNAL_ERROR"))
+                    peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "INTERNAL_ERROR"))
                 }
             })
         }.exceptionally { e ->
             plugin.logger.log(Level.WARNING, "Failed to resolve player '$playerName': ${e.message}")
-            session.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "PLAYER_LOOKUP_FAILED"))
+            peer.send(buildWhitelistResult(id, "whitelist_remove", false, playerName, "PLAYER_LOOKUP_FAILED"))
             null
         }
     }
@@ -262,6 +273,10 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             addProperty("type", "auth_result")
             addProperty("id", id)
             addProperty("success", success)
+            // 三端统一的身份握手：网站据此判断对端能力与版本
+            addProperty("protocol_version", PROTOCOL_VERSION)
+            addProperty("impl", IMPL)
+            addProperty("impl_version", plugin.pluginMeta.version)
             if (error != null) addProperty("error", error)
         }.let { gson.toJson(it) }
     }

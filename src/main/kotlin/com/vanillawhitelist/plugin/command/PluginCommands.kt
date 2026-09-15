@@ -89,7 +89,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
         sender.sendMessage(msg("=== VanillaWhitelist Status ===", NamedTextColor.GREEN))
         sender.sendMessage(
             msg("WebSocket: ", NamedTextColor.YELLOW)
-                .append(if (plugin.wsServer.isRunning) msg("Running", NamedTextColor.GREEN)
+                .append(if (plugin.transport.isRunning) msg("Running", NamedTextColor.GREEN)
                         else msg("Stopped", NamedTextColor.RED))
         )
         sender.sendMessage(
@@ -98,7 +98,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
         )
         sender.sendMessage(
             msg("Connections: ", NamedTextColor.YELLOW)
-                .append(msg(if (plugin.wsServer.hasConnections()) "1 active" else "none", NamedTextColor.WHITE))
+                .append(msg(if (plugin.transport.hasConnections()) "1 active" else "none", NamedTextColor.WHITE))
         )
         sender.sendMessage(
             msg("Debug: ", NamedTextColor.YELLOW)
@@ -108,7 +108,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
             msg("Total Joins: ", NamedTextColor.YELLOW)
                 .append(msg("${plugin.worldTracker.totalJoins}", NamedTextColor.WHITE))
         )
-        val buffered = plugin.wsServer.bufferSize()
+        val buffered = plugin.transport.bufferSize()
         if (buffered > 0) {
             sender.sendMessage(
                 msg("Buffer Queue: ", NamedTextColor.YELLOW)
@@ -224,7 +224,7 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
     private fun handleReload(sender: CommandSender) {
         plugin.pluginConfig.load()
         plugin.statsCollector.cancelTasks()
-        plugin.wsServer.restart()
+        plugin.transport.restart()
         plugin.statsCollector.startPeriodicTasks()
         sender.sendMessage(msg("Config reloaded and WebSocket server restarted!", NamedTextColor.GREEN))
     }

@@ -1,6 +1,7 @@
 package com.vanillawhitelist.plugin.ws
 
 import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
+import com.vanillawhitelist.plugin.stampProtocolVersion
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
@@ -18,7 +19,7 @@ import java.util.logging.Level
  * 5. 消息仅推送给已认证连接，未认证连接收不到任何服务器数据
  * 6. connectionLostTimeout 半开连接检测，避免消息被发进死连接而不进缓冲队列
  */
-class WsServer(private val plugin: VanillaWhitelistPlugin) {
+class WsServer(private val plugin: VanillaWhitelistPlugin) : Transport {
 
     private var server: WebSocketServerImpl? = null
     private var running = false
@@ -32,9 +33,9 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
     /** 默认密钥占位符（与 config.yml 默认值一致），检测到则拒绝启动 */
     private val DEFAULT_SECRET_PLACEHOLDER = "change-me-to-a-random-string"
 
-    val isRunning: Boolean get() = running
+    override val isRunning: Boolean get() = running
 
-    fun start() {
+    override fun start() {
         val config = plugin.pluginConfig
         if (!config.websocketEnabled) {
             plugin.logger.info("WebSocket server is disabled in config, not starting.")
@@ -55,6 +56,18 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
             return
         }
 
+        // 端口冲突守卫：与游戏端口相同会导致 Minecraft 服务端自身绑定失败
+        val gamePort = plugin.server.port
+        if (config.websocketPort == gamePort) {
+            plugin.logger.severe("============================================================")
+            plugin.logger.severe(" WebSocket 端口与游戏端口相同：" + gamePort)
+            plugin.logger.severe(" 已拒绝启动 WebSocket，否则会导致服务端无法启动。")
+            plugin.logger.severe(" 请把 config.yml 里的 websocket.port 改成其他值（例如 25585）。")
+            plugin.logger.severe("============================================================")
+            running = false
+            return
+        }
+
         try {
             server = WebSocketServerImpl(InetSocketAddress(config.websocketHost, config.websocketPort)).apply {
                 // 半开连接检测：底层 ping/pong，超时自动触发 onClose，
@@ -70,7 +83,7 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
         }
     }
 
-    fun stop() {
+    override fun stop() {
         running = false
         try {
             // 快照连接列表，避免并发修改
@@ -84,7 +97,7 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
         }
     }
 
-    fun restart() {
+    override fun restart() {
         plugin.logger.info("Restarting WebSocket server...")
         stop()
         start()
@@ -95,14 +108,16 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
      * Java-WebSocket 库的 send() 是非阻塞的（内部排队），可安全在异步线程调用。
      * 仅推送给已认证连接——未认证连接收不到任何服务器数据。
      */
-    fun send(json: String) {
+    override fun send(json: String) {
+        // 三端统一：所有推送消息都带上 protocol_version
+        val payload = stampProtocolVersion(json)
         if (hasConnections()) {
             // 快照连接列表，避免并发迭代异常
             val conns = server?.connections?.toList() ?: return
             for (conn in conns) {
                 if (conn.isOpen && WsSession.get(conn)?.authenticated == true) {
                     try {
-                        conn.send(json)
+                        conn.send(payload)
                     } catch (e: Exception) {
                         plugin.logger.log(Level.WARNING, "WS send failed to ${conn.remoteSocketAddress}: ${e.message}")
                     }
@@ -110,7 +125,7 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
             }
         } else {
             // 网站离线，缓冲到数据库（DB 触发器会自动裁剪超额记录）
-            val queueSize = plugin.database.enqueueMessage(json)
+            val queueSize = plugin.database.enqueueMessage(payload)
             if (plugin.pluginConfig.debug && queueSize % 100 == 0 && queueSize > 0) {
                 plugin.logger.info("Buffered message (queue size: $queueSize)")
             }
@@ -121,7 +136,7 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
      * 补发缓冲的消息（认证成功后调用）
      * 单次最多补发 [MAX_FLUSH_BATCH] 条，剩余等下次调用，避免阻塞实时数据流
      */
-    fun flushBuffer() {
+    override fun flushBuffer() {
         val messages = plugin.database.dequeueAll()
         if (messages.isEmpty()) return
 
@@ -153,13 +168,13 @@ class WsServer(private val plugin: VanillaWhitelistPlugin) {
         plugin.logger.info("Flushed ${toFlush.size} messages.")
     }
 
-    fun bufferSize(): Int = plugin.database.queueSize()
+    override fun bufferSize(): Int = plugin.database.queueSize()
 
     /**
      * 检查是否有已认证的活跃连接。
      * 未认证连接不算——消息不应推送给它们，离线期间应转入缓冲队列。
      */
-    fun hasConnections(): Boolean {
+    override fun hasConnections(): Boolean {
         return server?.connections?.any { it.isOpen && WsSession.get(it)?.authenticated == true } == true
     }
 

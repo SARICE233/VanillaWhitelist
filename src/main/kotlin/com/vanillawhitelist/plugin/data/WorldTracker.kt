@@ -1,5 +1,7 @@
 package com.vanillawhitelist.plugin.data
 
+import com.google.gson.Gson
+import com.google.gson.JsonObject
 import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
 import org.bukkit.Bukkit
 import org.bukkit.event.EventHandler
@@ -35,12 +37,31 @@ class WorldTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
     private val KEY_TOTAL_BLOCKS_BROKEN = "total_blocks_broken"
     private val KEY_TOTAL_BLOCKS_PLACED = "total_blocks_placed"
     private val KEY_TOTAL_ADVANCEMENTS = "total_advancements"
+    private val KEY_WORLD_PREFIX = "world_"
+    private val gson = Gson()
 
     // 服务器级累计（内存镜像，启动时从 DB 加载）
     private val _totalJoins = AtomicLong(0)
     private val _totalBlocksBroken = AtomicLong(0)
     private val _totalBlocksPlaced = AtomicLong(0)
     private val _totalAdvancements = AtomicLong(0)
+
+    /**
+     * 各维度的方块累计（内存镜像，key 首次访问时从 DB 懒加载）。
+     * world_stats 按维度分别统计，避免每个世界条目填同一份全局总数。
+     */
+    private val worldCounters = ConcurrentHashMap<String, AtomicLong>()
+
+    private fun worldCounter(key: String): AtomicLong =
+        worldCounters.computeIfAbsent(key) { AtomicLong(plugin.database.getLong(it)) }
+
+    /** 查询某个世界累计破坏方块数 */
+    fun getWorldBlocksBroken(worldName: String): Long =
+        worldCounter(worldBlocksBrokenKey(worldName)).get()
+
+    /** 查询某个世界累计放置方块数 */
+    fun getWorldBlocksPlaced(worldName: String): Long =
+        worldCounter(worldBlocksPlacedKey(worldName)).get()
 
     /** 玩家加入时间戳，用于计算会话在线时长（统一管理，PlayerTracker 复用） */
     val joinTimestamps = ConcurrentHashMap<UUID, Long>()
@@ -116,6 +137,10 @@ class WorldTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
         _totalBlocksBroken.incrementAndGet()
         pendingDeltaQueue.add(KEY_TOTAL_BLOCKS_BROKEN to 1L)
         pendingDeltaQueue.add(playerBlocksBrokenKey(event.player.uniqueId.toString()) to 1L)
+        // 按维度累计
+        val worldKey = worldBlocksBrokenKey(event.block.world.name)
+        worldCounter(worldKey).incrementAndGet()
+        pendingDeltaQueue.add(worldKey to 1L)
     }
 
     @EventHandler
@@ -124,6 +149,10 @@ class WorldTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
         _totalBlocksPlaced.incrementAndGet()
         pendingDeltaQueue.add(KEY_TOTAL_BLOCKS_PLACED to 1L)
         pendingDeltaQueue.add(playerBlocksPlacedKey(event.player.uniqueId.toString()) to 1L)
+        // 按维度累计
+        val worldKey = worldBlocksPlacedKey(event.block.world.name)
+        worldCounter(worldKey).incrementAndGet()
+        pendingDeltaQueue.add(worldKey to 1L)
     }
 
     // ── Advancement ────────────────────────────────────────────────────
@@ -137,6 +166,16 @@ class WorldTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
         _totalAdvancements.incrementAndGet()
         pendingDeltaQueue.add(KEY_TOTAL_ADVANCEMENTS to 1L)
         pendingDeltaQueue.add(playerAdvancementsKey(event.player.uniqueId.toString()) to 1L)
+
+        // 实时推送成就明细事件（与两个模组一致）
+        val json = JsonObject().apply {
+            addProperty("type", "player_event")
+            addProperty("event", "advancement")
+            addProperty("player_name", event.player.name)
+            addProperty("player_uuid", event.player.uniqueId.toString())
+            addProperty("advancement", key.toString())
+        }
+        plugin.transport.send(gson.toJson(json))
     }
 
     // ── Public Query Methods ───────────────────────────────────────────
@@ -201,4 +240,6 @@ class WorldTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
     private fun playerBlocksBrokenKey(uuid: String) = "player_${uuid}_blocks_broken"
     private fun playerBlocksPlacedKey(uuid: String) = "player_${uuid}_blocks_placed"
     private fun playerAdvancementsKey(uuid: String) = "player_${uuid}_advancements"
+    private fun worldBlocksBrokenKey(world: String) = KEY_WORLD_PREFIX + world + "_blocks_broken"
+    private fun worldBlocksPlacedKey(world: String) = KEY_WORLD_PREFIX + world + "_blocks_placed"
 }

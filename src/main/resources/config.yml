@@ -1,6 +1,12 @@
 # WebSocket 服务器配置
 websocket:
-  # 监听端口（确保与网站 config 表中 plugin_ws_port 一致）
+  # 连接模式：
+  #   server = 本端监听端口，网站主动连过来（需要开放端口 / 内网穿透）
+  #   client = 本端主动连网站，不需要开放任何端口
+  mode: "server"
+  # 出站模式（mode=client）下要连接的网站地址，例如 wss://example.com/vwl
+  url: ""
+  # 监听端口（仅 server 模式；确保与网站 config 表中 plugin_ws_port 一致）
   port: 25585
   # 认证密钥（必须与网站 config 表中 plugin_ws_secret 一致）
   secret: "change-me-to-a-random-string"
@@ -8,6 +14,10 @@ websocket:
   enabled: true
   # 绑定地址（0.0.0.0 = 所有网卡）
   host: "0.0.0.0"
+
+# 服务器标识（多服务器接同一个网站时用于区分）
+server:
+  id: "main"
 
 # 数据采集配置
 stats:
@@ -17,6 +27,20 @@ stats:
   world-stats-interval-seconds: 300
   # 玩家统计批量推送间隔（秒）
   player-stats-interval-seconds: 600
+
+# 性能告警（TPS / 内存超阈值时主动推送 performance_alert）
+alerts:
+  enabled: true
+  # TPS 低于此值告警（0 = 关闭该项）
+  tps-warning: 15.0
+  # TPS 低于此值升级为 critical
+  tps-critical: 10.0
+  # 内存占用百分比高于此值告警
+  memory-percent-warning: 85.0
+  # 内存占用百分比高于此值升级为 critical
+  memory-percent-critical: 95.0
+  # 同类告警冷却秒数（严重级别升级不受此限制）
+  cooldown-seconds: 300
 
 # 调试
 debug: false

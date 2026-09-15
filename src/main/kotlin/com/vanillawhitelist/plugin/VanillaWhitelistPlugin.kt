@@ -6,6 +6,8 @@ import com.vanillawhitelist.plugin.data.PlayerTracker
 import com.vanillawhitelist.plugin.data.StatsCollector
 import com.vanillawhitelist.plugin.data.WorldTracker
 import com.vanillawhitelist.plugin.ws.MessageHandler
+import com.vanillawhitelist.plugin.ws.Transport
+import com.vanillawhitelist.plugin.ws.WsClient
 import com.vanillawhitelist.plugin.ws.WsServer
 import org.bukkit.plugin.java.JavaPlugin
 
@@ -15,7 +17,8 @@ class VanillaWhitelistPlugin : JavaPlugin() {
         private set
     lateinit var database: DatabaseManager
         private set
-    lateinit var wsServer: WsServer
+    /** 传输层：按配置在「入站 (server)」与「出站 (client)」之间切换 */
+    lateinit var transport: Transport
         private set
     lateinit var messageHandler: MessageHandler
         private set
@@ -38,8 +41,12 @@ class VanillaWhitelistPlugin : JavaPlugin() {
         // 3. 初始化消息处理器
         messageHandler = MessageHandler(this)
 
-        // 4. 初始化 WebSocket 服务器
-        wsServer = WsServer(this)
+        // 4. 初始化传输层（按 mode 选择入站或出站）
+        transport = if (pluginConfig.websocketMode.equals("client", ignoreCase = true)) {
+            WsClient(this)
+        } else {
+            WsServer(this)
+        }
 
         // 5. 初始化数据追踪器
         playerTracker = PlayerTracker(this)
@@ -61,11 +68,11 @@ class VanillaWhitelistPlugin : JavaPlugin() {
         server.pluginManager.registerEvents(playerTracker, this)
         server.pluginManager.registerEvents(worldTracker, this)
 
-        // 8. 启动 WebSocket 服务器
+        // 8. 启动传输层
         if (pluginConfig.websocketEnabled) {
-            wsServer.start()
+            transport.start()
         } else {
-            logger.info("WebSocket server is disabled in config.")
+            logger.info("WebSocket is disabled in config.")
         }
 
         // 9. 启动定时任务（含 WorldTracker 的异步 flush 任务）
@@ -79,7 +86,7 @@ class VanillaWhitelistPlugin : JavaPlugin() {
         // 先停止 flush 任务并执行最后一次 flush，确保数据落盘
         worldTracker.stopFlushTask()
         statsCollector.cancelTasks()
-        wsServer.stop()
+        transport.stop()
         database.close()
         logger.info("VanillaWhitelist Plugin disabled!")
     }

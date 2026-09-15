@@ -1,6 +1,7 @@
 package com.vanillawhitelist.plugin.ws
 
 import com.vanillawhitelist.plugin.VanillaWhitelistPlugin
+import com.vanillawhitelist.plugin.stampProtocolVersion
 import org.bukkit.Bukkit
 import org.java_websocket.WebSocket
 import java.util.concurrent.ConcurrentHashMap
@@ -14,7 +15,7 @@ import java.util.logging.Level
 class WsSession(
     private val plugin: VanillaWhitelistPlugin,
     private val conn: WebSocket
-) {
+) : Peer {
 
     /** 底层连接（用于认证成功后的单连接替换） */
     val webSocket: WebSocket get() = conn
@@ -32,7 +33,7 @@ class WsSession(
 
     /** 是否已通过认证 */
     @Volatile
-    var authenticated = false
+    override var authenticated = false
 
     /** 认证超时任务 */
     private var authTimeoutTask: org.bukkit.scheduler.BukkitTask? = null
@@ -76,10 +77,15 @@ class WsSession(
         }
     }
 
-    fun send(json: String) {
+    override fun send(json: String) {
         if (conn.isOpen) {
-            conn.send(json)
+            // 所有出站消息统一盖协议版本号（推送与回复都走这里）
+            conn.send(stampProtocolVersion(json))
         }
+    }
+
+    override fun close() {
+        close(1000, "closed")
     }
 
     fun close(code: Int, reason: String) {

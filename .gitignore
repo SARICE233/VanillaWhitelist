@@ -4,6 +4,9 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
 
+# 误解压进来的 Gradle 发行版（wrapper 只需要那 4 个文件）
+gradle/wrapper/gradle-*/
+
 # IDE
 .idea/
 *.iml
@@ -20,3 +23,11 @@ plugins/
 
 # Secrets
 *.local.yml
+
+# 本地参考资料 / 下载的工具链（不属于插件源码）
+/mc-dev-docs/
+/libs/
+/.mimocode/
+/kotlin-compiler-*.zip
+/gradle-*-bin.zip
+/.toolchains/

@@ -42,7 +42,7 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
             addProperty("player_name", player.name)
             addProperty("player_uuid", player.uniqueId.toString())
         }
-        plugin.wsServer.send(gson.toJson(json))
+        plugin.transport.send(gson.toJson(json))
 
         if (plugin.pluginConfig.debug) {
             plugin.logger.info("Player joined: ${player.name} (${player.uniqueId})")
@@ -70,7 +70,7 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
             addProperty("player_uuid", uuid.toString())
             addProperty("playtime_seconds", playtimeSeconds)
         }
-        plugin.wsServer.send(gson.toJson(json))
+        plugin.transport.send(gson.toJson(json))
 
         // 在主线程抓取统计快照：getStatistic/firstPlayed 等实体读取不是线程安全的，
         // 异步任务只接收不可变快照，严禁把 Player 对象带进异步线程
@@ -111,7 +111,7 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
             addProperty("to", player.world.environment.toDisplayName())
         }
 
-        plugin.wsServer.send(gson.toJson(json))
+        plugin.transport.send(gson.toJson(json))
     }
 
     // ── Death ─────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
             addProperty("cause", cause)
         }
 
-        plugin.wsServer.send(gson.toJson(json))
+        plugin.transport.send(gson.toJson(json))
 
         if (plugin.pluginConfig.debug) {
             plugin.logger.info("Player died: ${player.name} (cause: $cause)")
@@ -185,7 +185,7 @@ class PlayerTracker(private val plugin: VanillaWhitelistPlugin) : Listener {
                 addProperty("type", "player_stats_batch")
                 add("players", com.google.gson.JsonArray().apply { add(playerObj) })
             }
-            plugin.wsServer.send(gson.toJson(batch))
+            plugin.transport.send(gson.toJson(batch))
 
         } catch (e: Exception) {
             plugin.logger.log(Level.WARNING, "Error pushing quit stats for ${snap.name}: ${e.message}", e)

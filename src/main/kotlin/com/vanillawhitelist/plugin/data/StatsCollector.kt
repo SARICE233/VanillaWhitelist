@@ -55,7 +55,10 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
         // 玩家统计：异步执行（含大量 DB 查询，必须异步）
         playerStatsTask = Bukkit.getScheduler().runTaskTimerAsynchronously(
             plugin,
-            Runnable { collectAndPushPlayerStatsAsync() },
+            Runnable {
+                collectAndPushPlayerStatsAsync()
+                collectAndPushPlayerAdvancements(true)
+            },
             300L,
             config.playerStatsIntervalSeconds * 20L
         )
@@ -75,7 +78,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
     // ── Server Stats（主线程，轻量级）──────────────────────────────────
 
     fun collectAndPushServerStats() {
-        if (!plugin.wsServer.isRunning || !plugin.wsServer.hasConnections()) return
+        if (!plugin.transport.isRunning || !plugin.transport.hasConnections()) return
 
         try {
             val tpsArray = Bukkit.getTPS()
@@ -102,7 +105,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
 
             val json = JsonObject().apply {
                 addProperty("type", "server_stats")
-                addProperty("server_id", "main")
+                addProperty("server_id", plugin.pluginConfig.serverId)
                 addProperty("tps", Math.round(tps * 10.0) / 10.0)
                 addProperty("mspt", Math.round(mspt * 10.0) / 10.0)
                 addProperty("memory_used", memoryUsed)
@@ -115,7 +118,10 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
                 add("players", playersArray)
             }
 
-            plugin.wsServer.send(gson.toJson(json))
+            plugin.transport.send(gson.toJson(json))
+
+            // 顺带做一次性能告警检查（内部有冷却）
+            checkAlerts(tps, mspt, memoryUsed, memoryMax)
 
             if (plugin.pluginConfig.debug) {
                 plugin.logger.info("Server stats pushed: TPS=${"%.1f".format(tps)}, " +
@@ -126,10 +132,133 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
         }
     }
 
+    // ── 成就明细（异步线程，快照走主线程）──────────────────────────────
+
+    private val advSignatures = java.util.concurrent.ConcurrentHashMap<java.util.UUID, Int>()
+
+    /**
+     * 成就明细：每位在线玩家的完整成就 id 列表。
+     *
+     * @param onlyChanged true 时只推自上次以来有变化的玩家（定时推送用）
+     *                    false 时推全部在线玩家（网站刚连上时给一份基准）
+     */
+    fun collectAndPushPlayerAdvancements(onlyChanged: Boolean) {
+        if (!plugin.transport.isRunning || !plugin.transport.hasConnections()) return
+
+        // 玩家成就进度必须在主线程读
+        val snapshot: Map<java.util.UUID, Pair<String, List<String>>> = try {
+            Bukkit.getScheduler().callSyncMethod(plugin, Callable {
+                val all = Bukkit.advancementIterator().asSequence().toList()
+                Bukkit.getOnlinePlayers().associate { p ->
+                    p.uniqueId to (p.name to all.filter { adv ->
+                        p.getAdvancementProgress(adv).isDone
+                    }.map { it.key.toString() })
+                }
+            }).get()
+        } catch (e: Exception) {
+            plugin.logger.log(Level.WARNING, "Error snapshotting advancements: " + e.message, e)
+            return
+        }
+
+        try {
+            val playersArray = JsonArray()
+            for ((uuid, data) in snapshot) {
+                val name = data.first
+                val ids = data.second
+                val sig = ids.hashCode()
+                val prev = advSignatures.put(uuid, sig)
+                if (onlyChanged && prev != null && prev == sig) continue
+                val idsArray = JsonArray()
+                ids.forEach { idsArray.add(it) }
+                playersArray.add(JsonObject().apply {
+                    addProperty("uuid", uuid.toString())
+                    addProperty("name", name)
+                    addProperty("total", ids.size)
+                    add("advancements", idsArray)
+                })
+            }
+            if (onlyChanged && playersArray.size() == 0) return
+
+            val json = JsonObject().apply {
+                addProperty("type", "player_advancements")
+                add("players", playersArray)
+            }
+            plugin.transport.send(gson.toJson(json))
+        } catch (e: Exception) {
+            plugin.logger.log(Level.WARNING, "Error collecting advancements: " + e.message, e)
+        }
+    }
+
+    // ── 性能告警 ──────────────────────────────────────────────────────
+
+    private var lastAlertAt = 0L
+    private var lastAlertSeverity = 0
+
+    /**
+     * 性能告警检查。超过阈值且不在冷却期内时推送 performance_alert。
+     * 严重级别升级（warning → critical）会立即告警，不受冷却限制。
+     */
+    private fun checkAlerts(tps: Double, mspt: Double, memoryUsed: Long, memoryMax: Long) {
+        val cfg = plugin.pluginConfig
+        if (!cfg.alertsEnabled) return
+
+        val alerts = JsonArray()
+        var severity = 0
+
+        if (cfg.tpsCritical > 0 && tps < cfg.tpsCritical) {
+            severity = 2
+            alerts.add(alertItem("tps", tps, cfg.tpsCritical))
+        } else if (cfg.tpsWarning > 0 && tps < cfg.tpsWarning) {
+            severity = maxOf(severity, 1)
+            alerts.add(alertItem("tps", tps, cfg.tpsWarning))
+        }
+
+        val memPct = if (memoryMax <= 0L) 0.0 else memoryUsed * 100.0 / memoryMax
+        if (cfg.memoryPercentCritical > 0 && memPct > cfg.memoryPercentCritical) {
+            severity = 2
+            alerts.add(alertItem("memory_percent", memPct, cfg.memoryPercentCritical))
+        } else if (cfg.memoryPercentWarning > 0 && memPct > cfg.memoryPercentWarning) {
+            severity = maxOf(severity, 1)
+            alerts.add(alertItem("memory_percent", memPct, cfg.memoryPercentWarning))
+        }
+
+        if (severity == 0) {
+            lastAlertSeverity = 0
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val escalated = severity > lastAlertSeverity
+        if (!escalated && now - lastAlertAt < cfg.alertCooldownSeconds * 1000L) return
+
+        lastAlertAt = now
+        lastAlertSeverity = severity
+
+        val sevName = if (severity == 2) "critical" else "warning"
+        val json = JsonObject().apply {
+            addProperty("type", "performance_alert")
+            addProperty("severity", sevName)
+            add("alerts", alerts)
+            addProperty("tps", Math.round(tps * 10.0) / 10.0)
+            addProperty("mspt", Math.round(mspt * 10.0) / 10.0)
+            addProperty("memory_used", memoryUsed)
+            addProperty("memory_max", memoryMax)
+        }
+        plugin.transport.send(gson.toJson(json))
+        plugin.logger.warning("Performance alert pushed: severity=" + sevName)
+    }
+
+    private fun alertItem(metric: String, value: Double, threshold: Double): JsonObject =
+        JsonObject().apply {
+            addProperty("metric", metric)
+            addProperty("value", Math.round(value * 10.0) / 10.0)
+            addProperty("threshold", threshold)
+        }
+
     // ── World Stats（异步线程）─────────────────────────────────────────
 
     fun collectAndPushWorldStats() {
-        if (!plugin.wsServer.isRunning || !plugin.wsServer.hasConnections()) return
+        if (!plugin.transport.isRunning || !plugin.transport.hasConnections()) return
 
         // 切回主线程快照世界数据：world.loadedChunks 要访问世界区块表，异步读取不安全。
         // callSyncMethod 阻塞当前异步线程，直到主线程执行完毕返回结果
@@ -156,8 +285,8 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
                     addProperty("name", snap.name)
                     addProperty("type", snap.environment.toDisplayName())
                     addProperty("explored_chunks", snap.loadedChunkCount)
-                    addProperty("total_blocks_placed", plugin.worldTracker.totalBlocksPlaced)
-                    addProperty("total_blocks_broken", plugin.worldTracker.totalBlocksBroken)
+                    addProperty("total_blocks_placed", plugin.worldTracker.getWorldBlocksPlaced(snap.name))
+                    addProperty("total_blocks_broken", plugin.worldTracker.getWorldBlocksBroken(snap.name))
                     addProperty("total_players_joined", plugin.worldTracker.totalJoins)
                     addProperty("total_advancements", plugin.worldTracker.totalAdvancements)
                 })
@@ -168,7 +297,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
                 add("worlds", worldsArray)
             }
 
-            plugin.wsServer.send(gson.toJson(json))
+            plugin.transport.send(gson.toJson(json))
         } catch (e: Exception) {
             plugin.logger.log(Level.WARNING, "Error collecting world stats: ${e.message}", e)
         }
@@ -181,7 +310,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
      * 然后在异步线程执行 DB 查询和 JSON 序列化。
      */
     private fun collectAndPushPlayerStatsAsync() {
-        if (!plugin.wsServer.isRunning || !plugin.wsServer.hasConnections()) return
+        if (!plugin.transport.isRunning || !plugin.transport.hasConnections()) return
 
         // 本方法运行在异步线程：getOnlinePlayers 遍历与 getStatistic 读取都不是
         // 线程安全的，必须切回主线程抓取快照（callSyncMethod 会阻塞当前线程直到主线程执行完毕）
@@ -236,7 +365,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
                 addProperty("type", "player_stats_batch")
                 add("players", playersArray)
             }
-            plugin.wsServer.send(gson.toJson(json))
+            plugin.transport.send(gson.toJson(json))
         } catch (e: Exception) {
             plugin.logger.log(Level.WARNING, "Error collecting player stats: ${e.message}", e)
         }
