@@ -125,10 +125,17 @@ class PluginCommands(private val plugin: VanillaWhitelistPlugin) : CommandExecut
     // ── stats ─────────────────────────────────────────────────────────
 
     private fun handleStats(sender: CommandSender) {
-        sender.sendMessage(msg("Pushing server stats...", NamedTextColor.GREEN))
-        // server_stats 含主线程字段，需同步执行
+        sender.sendMessage(msg("Pushing full snapshot...", NamedTextColor.GREEN))
+        // server_stats 含主线程字段，同步推
         plugin.statsCollector.collectAndPushServerStats()
-        sender.sendMessage(msg("Server stats pushed!", NamedTextColor.GREEN))
+        // 其余三条内部会用 callSyncMethod 切回主线程，必须异步调用：
+        // 在主线程上直接调，callSyncMethod(...).get() 会自己等自己，直接锁死
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, Runnable {
+            plugin.statsCollector.collectAndPushWorldStats()
+            plugin.statsCollector.collectAndPushPlayerStatsAsync()
+            plugin.statsCollector.collectAndPushPlayerAdvancements(false)
+        })
+        sender.sendMessage(msg("Full snapshot pushed!", NamedTextColor.GREEN))
     }
 
     // ── whitelist ─────────────────────────────────────────────────────

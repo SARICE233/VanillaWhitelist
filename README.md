@@ -117,7 +117,7 @@ openssl rand -hex 24
 | 命令 | 说明 |
 | --- | --- |
 | `/vwl status` | 查看连接状态与待发队列长度 |
-| `/vwl stats` | 立即推送一次 `server_stats` |
+| `/vwl stats` | 立即推送一次全量快照：`server_stats` / `world_stats` / `player_stats_batch` / `player_advancements` |
 | `/vwl whitelist add <玩家>` | 手动添加白名单 |
 | `/vwl whitelist remove <玩家>` | 手动移除白名单 |
 | `/vwl reload` | 重载配置并重启 WebSocket 服务 |
@@ -134,9 +134,10 @@ openssl rand -hex 24
 { "type": "auth", "id": "auth-1", "secret": "配置里的 secret" }
 ```
 
-认证成功后你会先收到一条 `server_stats` 和一条 `player_advancements`，随后按配置的间隔持续推送。
+认证成功后你会**立刻**收到三条基准消息：`server_stats`、`player_advancements`（全量）、`player_stats_batch`，随后按配置的间隔持续推送。
 
 **完整消息格式、字段说明与错误码见 [`PROTOCOL.md`](./PROTOCOL.md)。**
+**接入手册（到达时机表、字段语义、数据模型、常见坑、可跑的参考实现）见 [`WEBSITE-GUIDE.md`](./WEBSITE-GUIDE.md)。**
 
 仓库里的 `test-ws.html` 是浏览器版调试工具，可直接连上查看推送内容。
 

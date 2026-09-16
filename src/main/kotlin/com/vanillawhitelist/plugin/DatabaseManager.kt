@@ -26,8 +26,11 @@ class DatabaseManager(private val plugin: VanillaWhitelistPlugin) {
     private var connection: Connection? = null
     private final val lock = Any()
 
-    /** 消息队列硬上限，超出时丢弃最旧消息 */
-    private val MAX_QUEUE_SIZE = 10000
+    /**
+     * 消息队列硬上限，超出时丢弃最旧消息。
+     * 必须与 PROTOCOL.md §14 以及两个模组的 Database.MAX_QUEUE 保持一致（1000）。
+     */
+    private val MAX_QUEUE_SIZE = 1000
 
     // ── 生命周期 ──────────────────────────────────────────────────────
 

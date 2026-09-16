@@ -309,7 +309,7 @@ class StatsCollector(private val plugin: VanillaWhitelistPlugin) {
      * 异步采集玩家统计。通过 callSyncMethod 切回主线程快照在线玩家基础信息，
      * 然后在异步线程执行 DB 查询和 JSON 序列化。
      */
-    private fun collectAndPushPlayerStatsAsync() {
+    fun collectAndPushPlayerStatsAsync() {
         if (!plugin.transport.isRunning || !plugin.transport.hasConnections()) return
 
         // 本方法运行在异步线程：getOnlinePlayers 遍历与 getStatistic 读取都不是

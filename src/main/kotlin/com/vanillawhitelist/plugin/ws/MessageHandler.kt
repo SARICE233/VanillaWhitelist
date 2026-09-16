@@ -100,6 +100,9 @@ class MessageHandler(private val plugin: VanillaWhitelistPlugin) {
             plugin.statsCollector.collectAndPushServerStats()
             // 并给一份完整的成就明细作基准
             plugin.statsCollector.collectAndPushPlayerAdvancements(false)
+            // 再补一份玩家统计基准：定时推送默认 600 秒一次，认证时不补的话
+            // 网站会长时间停在空的玩家数据上
+            plugin.statsCollector.collectAndPushPlayerStatsAsync()
         } else {
             peer.send(buildAuthResult(id, false, "INVALID_SECRET"))
             if (peer is WsSession) peer.close(4003, "Invalid secret") else peer.close()
