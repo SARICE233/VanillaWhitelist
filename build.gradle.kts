@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.vanillawhitelist"
-version = "1.0.5-alpha"
+version = "1.0.6-alpha"
 
 repositories {
     mavenCentral()
